@@ -93,6 +93,30 @@ Add this to `.cursor/mcp.json` in your project:
 </details>
 
 <details>
+<summary><b>VS Code (GitHub Copilot)</b></summary>
+
+Add this to your `.vscode/settings.json`:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "tuya": {
+        "command": "uvx",
+        "args": ["mcp-server-tuya"],
+        "env": {
+          "TUYA_ACCESS_ID": "your_access_id",
+          "TUYA_ACCESS_KEY": "your_access_key",
+          "TUYA_API_ENDPOINT": "https://openapi.tuyaeu.com"
+        }
+      }
+    }
+  }
+}
+```
+</details>
+
+<details>
 <summary><b>ChatGPT / Other MCP clients</b></summary>
 
 Any MCP-compatible client can use this server. The general pattern is:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-server-tuya"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for controlling Tuya smart home devices via Claude Desktop and other MCP clients"
 readme = "README.md"
 license = "MIT"
