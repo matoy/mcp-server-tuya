@@ -13,7 +13,18 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that l
 
 ## Features
 
-- **10 tools** for complete device control (on/off, brightness, color, temperature, custom commands)
+- **33 tools** for comprehensive smart home control:
+  - 🏠 **Room Management**: List rooms, manage devices per room, bulk room control
+  - 🎬 **Scenes**: List and trigger automated scenes
+  - 💡 **Lighting**: On/off, brightness, color temperature, RGB color control
+  - 🌡️ **Climate**: Thermostat control, operating modes, temperature setting
+  - ⏱️ **Timers**: Countdown timers for auto-off functionality
+  - 🔌 **Power**: Smart plug controls with energy monitoring
+  - 🎚️ **Fans**: Speed and mode control for fan devices
+  - 🪟 **Blinds**: Open/close/position control for curtains and blinds
+  - 📊 **Analytics**: Device events history, energy consumption data
+  - ⚙️ **Device Mgmt**: Rename devices, check online status, device capabilities
+  - 🔋 **Batch Operations**: Send commands to multiple devices at once
 - **Device name resolution** — use friendly names like "Living Room Light" instead of IDs
 - **Intelligent caching** — configurable TTL to reduce API calls
 - **All Tuya regions** — EU, US, CN, IN
@@ -160,20 +171,84 @@ pip install git+https://github.com/juanmartinsantos/mcp-server-tuya.git
 
 ## Available Tools
 
+All tools accept either a **device ID** or a **device name** (e.g., `"Living Room Light"`).
+
+### 📱 Discovery & Status
 | Tool | Description |
 |------|-------------|
 | `tuya_list_devices` | List all devices with IDs, names, categories, and online status |
 | `tuya_get_device_status` | Get current device state (power, brightness, temperature, etc.) |
 | `tuya_get_device_info` | Get detailed device info (model, firmware, capabilities) |
+
+### 🏠 Room / Location Management
+| Tool | Description |
+|------|-------------|
+| `tuya_list_rooms` | List all rooms in your home |
+| `tuya_get_room_devices` | Get all devices in a specific room |
+| `tuya_add_device_to_room` | Add a device to a room |
+| `tuya_remove_device_from_room` | Remove a device from a room |
+| `tuya_control_room_devices` | Send commands to all devices in a room at once |
+
+### 💡 Basic Control
+| Tool | Description |
+|------|-------------|
 | `tuya_turn_on_device` | Turn on a device (supports multi-switch devices) |
 | `tuya_turn_off_device` | Turn off a device (supports multi-switch devices) |
 | `tuya_toggle_device` | Toggle device on/off |
+
+### 🎨 Lighting Control
+| Tool | Description |
+|------|-------------|
 | `tuya_set_brightness` | Set light brightness (0-1000) |
 | `tuya_set_color_temperature` | Set color temperature: warm (0) to cool (1000) |
-| `tuya_set_color` | Set RGB color using HSV values |
-| `tuya_send_command` | Send any custom command to a device |
+| `tuya_set_color` | Set RGB color using HSV: hue (0-360), saturation (0-255), value (0-255) |
 
-All tools accept either a **device ID** or a **device name** (e.g., `"Living Room Light"`).
+### 🎬 Scenes
+| Tool | Description |
+|------|-------------|
+| `tuya_list_scenes` | List all available scenes |
+| `tuya_trigger_scene` | Trigger (execute) a scene by ID |
+
+### 🌡️ Climate Control
+| Tool | Description |
+|------|-------------|
+| `tuya_set_temperature` | Set target temperature for thermostat |
+| `tuya_set_mode` | Set operating mode (heat, cool, auto, wind, dry, off) |
+
+### ⏱️ Timers
+| Tool | Description |
+|------|-------------|
+| `tuya_set_countdown` | Set countdown timer (auto-off after N seconds) |
+| `tuya_get_countdown` | Get active countdown timer status |
+
+### 📊 Device Specifications & Monitoring
+| Tool | Description |
+|------|-------------|
+| `tuya_get_device_specs` | Get device specifications and available properties |
+| `tuya_get_device_capabilities` | Get all available commands/properties for a device |
+| `tuya_get_device_events` | Get recent events/history for a device |
+| `tuya_get_energy_usage` | Get energy consumption data (for smart plugs) |
+| `tuya_get_device_online_status` | Get detailed online status and connection info |
+
+### ⚙️ Device Management
+| Tool | Description |
+|------|-------------|
+| `tuya_rename_device` | Rename a device |
+| `tuya_send_command` | Send any custom command to a device |
+| `tuya_send_batch_commands` | Send commands to multiple devices at once |
+
+### 🎚️ Fan Control
+| Tool | Description |
+|------|-------------|
+| `tuya_set_fan_speed` | Set fan speed (0-100 or device-specific) |
+| `tuya_set_fan_mode` | Set fan operating mode (manual, auto, sleep, natural) |
+
+### 🪟 Blinds / Curtains / Covers
+| Tool | Description |
+|------|-------------|
+| `tuya_open_blind` | Open a blind/curtain/cover completely |
+| `tuya_close_blind` | Close a blind/curtain/cover completely |
+| `tuya_set_blind_position` | Set blind position (0=closed, 100=open) |
 
 ## Environment Variables
 
