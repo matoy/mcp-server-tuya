@@ -142,7 +142,7 @@ class TuyaClient:
         try:
             all_devices_raw = []
             page_no = 1
-            page_size = 100  # Larger page size for efficiency
+            page_size = 20  # Reduced page size to satisfy Tuya API limits (was 100)
             seen_device_ids = set()  # Track seen devices to prevent duplicates
 
             while True:
