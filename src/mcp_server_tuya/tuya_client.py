@@ -56,6 +56,87 @@ class TuyaClient:
         self._cache_timestamp = None
         sys.stderr.write("Device cache invalidated\n")
 
+    @staticmethod
+    def _to_bool(value: Any) -> bool:
+        """Normalize Tuya boolean-like values (bool/int/string) to bool."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "online", "on", "yes"}
+        return False
+
+    def _extract_online_status(self, device: Dict[str, Any]) -> bool:
+        """Extract online status from endpoint-specific field names."""
+        for key in ("isOnline", "online", "is_online"):
+            if key in device:
+                return self._to_bool(device.get(key))
+        return False
+
+    @staticmethod
+    def _extract_result_devices(result: Any) -> List[Dict[str, Any]]:
+        """Extract device arrays from Tuya responses with varying shapes."""
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            devices = result.get("devices")
+            if devices is None:
+                devices = result.get("list")
+            if isinstance(devices, list):
+                return devices
+        return []
+
+    @staticmethod
+    def _extract_result_list(result: Any, keys: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Extract list payloads from Tuya responses with varying shapes."""
+        if keys is None:
+            keys = ["list", "items", "result"]
+
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            for key in keys:
+                value = result.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
+    @staticmethod
+    def _extract_rooms_from_devices(devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Build room list from TinyTuya-compatible device metadata."""
+        room_map: Dict[str, Dict[str, Any]] = {}
+
+        for device in devices:
+            room_id = (
+                device.get("room_id")
+                or device.get("roomId")
+                or device.get("space_id")
+                or device.get("spaceId")
+            )
+            room_name = (
+                device.get("room_name")
+                or device.get("roomName")
+                or device.get("space_name")
+                or device.get("spaceName")
+            )
+
+            if not room_id and not room_name:
+                continue
+
+            room_id = str(room_id) if room_id else str(room_name)
+            room_name = room_name or f"Room {room_id}"
+
+            if room_id not in room_map:
+                room_map[room_id] = {
+                    "id": room_id,
+                    "name": str(room_name),
+                    "device_count": 0,
+                }
+            room_map[room_id]["device_count"] += 1
+
+        return list(room_map.values())
+
     def resolve_device_id(self, device_identifier: str) -> Dict[str, Any]:
         """
         Resolve a device identifier (ID or name) to a device_id.
@@ -121,8 +202,8 @@ class TuyaClient:
         """
         List all Tuya devices.
 
-        Uses the /v2.0/cloud/thing/device endpoint that lists devices
-        linked via the Smart Life / Tuya Smart app.
+        Uses the TinyTuya-style endpoint /v1.0/iot-01/associated-users/devices
+        with cursor-based pagination (last_row_key).
 
         Args:
             use_cache: If True, use cached data if available.
@@ -140,65 +221,18 @@ class TuyaClient:
             }
 
         try:
-            all_devices_raw = []
-            page_size = 20  # Tuya API limit per page
-            last_row_key = ""  # Cursor for pagination (empty = first page)
-            seen_device_ids = set()  # Track seen devices to prevent duplicates
-            page_num = 0
+            all_devices_raw = self._list_devices_from_associated_users_endpoint(page_size=20)
+            if all_devices_raw is None:
+                return {
+                    "success": False,
+                    "error": "Could not retrieve device list",
+                    "message": "TinyTuya-style listing failed on /v1.0/iot-01/associated-users/devices",
+                    "suggestion": "Verify that your Tuya cloud project has permission for associated-users device listing"
+                }
 
-            while True:
-                page_num += 1
-                params = {"page_size": page_size}
-                if last_row_key:
-                    params["last_row_key"] = last_row_key
-
-                response = self.openapi.get(
-                    "/v2.0/cloud/thing/device",
-                    params
-                )
-
-                if not response.get("success"):
-                    # Code 1110 = rate limit, retry with backoff
-                    if response.get("code") == 1110:
-                        wait_time = 2 ** min(page_num, 4)
-                        sys.stderr.write(f"Rate limited, retrying in {wait_time}s...\n")
-                        time.sleep(wait_time)
-                        continue
-                    sys.stderr.write(f"Error listing devices: {response}\n")
-                    return {
-                        "success": False,
-                        "error": "Could not retrieve device list",
-                        "message": f"API error: {response.get('msg', 'Unknown error')}",
-                        "suggestion": "Check your Tuya Cloud API credentials"
-                    }
-
-                result = response.get("result", {})
-
-                # The v2 API returns result as a dict with nested devices list
-                # and cursor-based pagination via last_row_key
-                if isinstance(result, dict):
-                    devices = result.get("devices", [])
-                    has_more = result.get("has_more", False)
-                    last_row_key = result.get("last_row_key", "")
-                else:
-                    # Fallback: some API versions return result as a direct list
-                    devices = result if isinstance(result, list) else []
-                    has_more = len(devices) >= page_size
-                    last_row_key = ""
-
-                new_devices_count = 0
-                for device in devices:
-                    device_id = device.get("id", "")
-                    if device_id and device_id not in seen_device_ids:
-                        all_devices_raw.append(device)
-                        seen_device_ids.add(device_id)
-                        new_devices_count += 1
-
-                sys.stderr.write(f"Page {page_num}: got {len(devices)} devices, {new_devices_count} new, has_more={has_more}\n")
-
-                if not has_more or not last_row_key:
-                    sys.stderr.write("Pagination complete\n")
-                    break
+            # TinyTuya also enriches device inventory with per-user fetches.
+            # This can recover devices missed by the global associated-users list.
+            all_devices_raw = self._merge_devices_from_uid_endpoints(all_devices_raw)
 
             all_devices = []
             for device in all_devices_raw:
@@ -213,7 +247,7 @@ class TuyaClient:
                     "name": display_name,
                     "category": device.get("category", "unknown"),
                     "product_name": device.get("productName", ""),
-                    "online": device.get("isOnline", False),
+                    "online": self._extract_online_status(device),
                     "ip": device.get("ip", "")
                 })
 
@@ -238,6 +272,154 @@ class TuyaClient:
                 "message": str(e),
                 "suggestion": "Check your internet connection and credentials"
             }
+
+    def _list_devices_from_associated_users_endpoint(self, page_size: int = 20) -> Optional[List[Dict[str, Any]]]:
+        """TinyTuya-style listing: query all devices from associated users endpoint."""
+        try:
+            devices_all: List[Dict[str, Any]] = []
+            has_more = True
+            last_key = ""
+            fetches = 0
+            max_fetches = 50
+
+            while has_more and fetches < max_fetches:
+                params: Dict[str, Any] = {"size": str(page_size)}
+                if last_key:
+                    params["last_row_key"] = last_key
+
+                response = self.openapi.get("/v1.0/iot-01/associated-users/devices", params)
+                fetches += 1
+
+                if not response or not response.get("success"):
+                    sys.stderr.write(f"Associated-users endpoint failed: {response}\n")
+                    return None
+
+                result = response.get("result", {})
+                if isinstance(result, dict):
+                    page_devices = self._extract_result_devices(result)
+
+                    devices_all.extend(page_devices)
+
+                    has_more = bool(result.get("has_more", False))
+                    last_key = result.get("last_row_key", "")
+
+                    sys.stderr.write(
+                        f"Page {fetches} (associated-users): got {len(page_devices)} devices, "
+                        f"total_so_far={len(devices_all)}, has_more={has_more}, cursor={'yes' if last_key else 'no'}\n"
+                    )
+                elif isinstance(result, list):
+                    page_devices = self._extract_result_devices(result)
+                    devices_all.extend(page_devices)
+
+                    sys.stderr.write(
+                        f"Page {fetches} (associated-users): got {len(page_devices)} devices, total_so_far={len(devices_all)}\n"
+                    )
+                    has_more = False
+                else:
+                    has_more = False
+
+            if fetches >= max_fetches:
+                sys.stderr.write(f"Associated-users listing stopped after {max_fetches} fetches\n")
+
+            if not devices_all:
+                return None
+            return devices_all
+        except Exception as e:
+            sys.stderr.write(f"Associated-users endpoint exception: {str(e)}\n")
+            return None
+
+    def _merge_devices_from_uid_endpoints(self, devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge missing devices using TinyTuya-like per-UID endpoint calls."""
+        try:
+            merged: List[Dict[str, Any]] = list(devices)
+            index_by_id: Dict[str, int] = {}
+            for idx, dev in enumerate(merged):
+                dev_id = dev.get("id")
+                if dev_id:
+                    index_by_id[dev_id] = idx
+
+            uids = []
+            seen_uids = set()
+            for dev in merged:
+                uid = dev.get("uid")
+                if uid and uid not in seen_uids:
+                    seen_uids.add(uid)
+                    uids.append(uid)
+
+            if not uids:
+                return merged
+
+            for uid in uids:
+                user_devices = self._list_devices_from_uid_v13(uid, page_size=75)
+                if not user_devices:
+                    continue
+
+                for new_dev in user_devices:
+                    new_id = new_dev.get("id")
+                    if not new_id:
+                        continue
+                    if new_id in index_by_id:
+                        # Fill missing fields from the user-specific payload.
+                        existing = merged[index_by_id[new_id]]
+                        for key, value in new_dev.items():
+                            if key not in existing or existing.get(key) in (None, "", []):
+                                existing[key] = value
+                    else:
+                        index_by_id[new_id] = len(merged)
+                        merged.append(new_dev)
+
+            if len(merged) != len(devices):
+                sys.stderr.write(
+                    f"UID merge added {len(merged) - len(devices)} devices "
+                    f"(from {len(devices)} to {len(merged)})\n"
+                )
+
+            return merged
+        except Exception as e:
+            sys.stderr.write(f"UID merge exception: {str(e)}\n")
+            return devices
+
+    def _list_devices_from_uid_v13(self, uid: str, page_size: int = 75) -> Optional[List[Dict[str, Any]]]:
+        """TinyTuya-like per-user listing via /v1.3/iot-03/devices."""
+        try:
+            all_devices: List[Dict[str, Any]] = []
+            last_row_key = ""
+            has_more = True
+            fetches = 0
+            max_fetches = 50
+
+            while has_more and fetches < max_fetches:
+                params: Dict[str, Any] = {
+                    "page_size": str(page_size),
+                    "source_type": "tuyaUser",
+                    "source_id": uid,
+                }
+                if last_row_key:
+                    params["last_row_key"] = last_row_key
+
+                response = self.openapi.get("/v1.3/iot-03/devices", params)
+                fetches += 1
+
+                if not response or not response.get("success"):
+                    return None
+
+                result = response.get("result", {})
+                if not isinstance(result, dict):
+                    break
+
+                page_devices = result.get("list", [])
+                if isinstance(page_devices, list):
+                    all_devices.extend(page_devices)
+
+                has_more = bool(result.get("has_more", False))
+                last_row_key = result.get("last_row_key", "")
+
+                if has_more and not last_row_key:
+                    break
+
+            return all_devices
+        except Exception:
+            return None
 
     def get_device_status(self, device_id: str) -> Dict[str, Any]:
         """
@@ -327,7 +509,7 @@ class TuyaClient:
                     "category": device_info.get("category", ""),
                     "product_name": device_info.get("product_name", ""),
                     "model": device_info.get("model", ""),
-                    "online": device_info.get("online", False),
+                    "online": self._extract_online_status(device_info),
                     "ip": device_info.get("ip", ""),
                     "sub": device_info.get("sub", False)
                 }
@@ -400,23 +582,30 @@ class TuyaClient:
     def list_rooms(self) -> Dict[str, Any]:
         """List all rooms/locations in the home."""
         try:
-            response = self.openapi.get("/v2.0/cloud/thing/space")
-            
-            if not response.get("success"):
-                sys.stderr.write(f"Error listing rooms: {response}\n")
+            # TinyTuya-first approach: derive room metadata from device inventory
+            # fetched from working endpoints.
+            devices = self._list_devices_from_associated_users_endpoint(page_size=50) or []
+            devices = self._merge_devices_from_uid_endpoints(devices)
+            rooms = self._extract_rooms_from_devices(devices)
+
+            if not rooms:
+                # Keep compatibility fallback for projects exposing dedicated space APIs.
+                response = self.openapi.get("/v2.0/cloud/thing/space")
+                if response and response.get("success"):
+                    rooms_data = self._extract_result_list(response.get("result", {}), ["list", "spaces", "items", "result"])
+                    for room in rooms_data:
+                        rooms.append({
+                            "id": room.get("spaceId", "") or room.get("id", ""),
+                            "name": room.get("name", "Unnamed"),
+                            "device_count": room.get("deviceCount", room.get("device_count", 0))
+                        })
+
+            if not rooms:
                 return {
-                    "success": False,
-                    "error": "Could not retrieve room list",
-                    "message": f"API error: {response.get('msg', 'Unknown error')}"
+                    "success": True,
+                    "message": "No room metadata available for this Tuya project",
+                    "data": []
                 }
-            
-            rooms = []
-            for room in response.get("result", []):
-                rooms.append({
-                    "id": room.get("spaceId", ""),
-                    "name": room.get("name", "Unnamed"),
-                    "device_count": room.get("deviceCount", 0)
-                })
             
             return {
                 "success": True,
@@ -448,13 +637,14 @@ class TuyaClient:
                     "room_id": room_id
                 }
             
+            room_devices = self._extract_result_devices(response.get("result", {}))
             devices = []
-            for device in response.get("result", []):
+            for device in room_devices:
                 devices.append({
                     "id": device.get("id", ""),
                     "name": device.get("customName", "") or device.get("name", "Unnamed"),
                     "category": device.get("category", "unknown"),
-                    "online": device.get("isOnline", False)
+                    "online": self._extract_online_status(device)
                 })
             
             return {
@@ -592,21 +782,66 @@ class TuyaClient:
     def list_scenes(self) -> Dict[str, Any]:
         """List all available scenes."""
         try:
-            response = self.openapi.get("/v2.0/cloud/scene")
-            
-            if not response.get("success"):
+            # Tuya scene endpoints vary across projects and often require pagination params.
+            candidate_calls = [
+                ("/v2.0/cloud/scene/rule", {"page_no": 1, "page_size": 100}),
+                ("/v2.0/cloud/scene/rule", {"pageNo": 1, "pageSize": 100}),
+                ("/v2.0/cloud/scene", None),
+            ]
+
+            response = None
+            for path, params in candidate_calls:
+                response = self.openapi.get(path, params) if params else self.openapi.get(path)
+                if response and response.get("success"):
+                    break
+
+            # Smart Home legacy APIs are often scoped per home/family.
+            if not response or not response.get("success"):
+                for home_id in self._get_home_ids():
+                    home_calls = [
+                        (f"/v1.0/homes/{home_id}/scenes", None),
+                        (f"/v1.0/families/{home_id}/scenes", None),
+                        ("/v2.0/cloud/scene/rule", {"space_id": home_id, "page_no": 1, "page_size": 100}),
+                    ]
+                    for path, params in home_calls:
+                        response = self.openapi.get(path, params) if params else self.openapi.get(path)
+                        if response and response.get("success"):
+                            break
+                    if response and response.get("success"):
+                        break
+
+            if not response or not response.get("success"):
                 sys.stderr.write(f"Error listing scenes: {response}\n")
+                api_code = str((response or {}).get("code", ""))
+                api_msg = (response or {}).get("msg", "Unknown error")
+
+                # Some Tuya tenants do not expose Scene APIs at all.
+                # Return an empty list rather than a hard failure.
+                if api_code in {"1108", "1106", "40001900"}:
+                    return {
+                        "success": True,
+                        "message": f"Scenes API not available for this project ({api_msg})",
+                        "data": []
+                    }
+
                 return {
                     "success": False,
                     "error": "Could not retrieve scene list",
-                    "message": f"API error: {response.get('msg', 'Unknown error')}"
+                    "message": f"API error: {api_msg}",
+                    "api_code": api_code,
+                    "suggestion": "Scene APIs may be unavailable for this Tuya project/region"
                 }
-            
+
+            result = response.get("result", {})
+            scenes_data = self._extract_result_list(result, ["list", "scenes", "items", "result"])
+            if isinstance(result, dict) and isinstance(result.get("rule_list"), list):
+                scenes_data = result.get("rule_list", [])
+
             scenes = []
-            for scene in response.get("result", []):
+            for scene in scenes_data:
                 scenes.append({
-                    "id": scene.get("sceneId", ""),
-                    "name": scene.get("sceneName", "Unnamed"),
+                    "id": scene.get("sceneId", "") or scene.get("id", "") or scene.get("rule_id", ""),
+                    "name": scene.get("sceneName", "") or scene.get("name", "") or scene.get("rule_name", "Unnamed"),
                     "description": scene.get("description", "")
                 })
             
@@ -627,9 +862,31 @@ class TuyaClient:
     def trigger_scene(self, scene_id: str) -> Dict[str, Any]:
         """Trigger (execute) a scene."""
         try:
-            response = self.openapi.post(
-                f"/v2.0/cloud/scene/{scene_id}/trigger"
-            )
+            candidate_calls = [
+                f"/v2.0/cloud/scene/rule/{scene_id}/actions/trigger",
+                f"/v2.0/cloud/scene/rule/{scene_id}/trigger",
+                f"/v2.0/cloud/scene/{scene_id}/trigger",
+                f"/v1.0/scenes/{scene_id}/trigger",
+            ]
+
+            response = None
+            for path in candidate_calls:
+                response = self.openapi.post(path)
+                if response and response.get("success"):
+                    break
+
+            if (not response or not response.get("success")) and self._get_home_ids():
+                for home_id in self._get_home_ids():
+                    home_calls = [
+                        f"/v1.0/homes/{home_id}/scenes/{scene_id}/trigger",
+                        f"/v1.0/families/{home_id}/scenes/{scene_id}/trigger",
+                    ]
+                    for path in home_calls:
+                        response = self.openapi.post(path)
+                        if response and response.get("success"):
+                            break
+                    if response and response.get("success"):
+                        break
             
             if not response.get("success"):
                 sys.stderr.write(f"Error triggering scene: {response}\n")
@@ -654,6 +911,31 @@ class TuyaClient:
                 "message": str(e),
                 "scene_id": scene_id
             }
+
+    def _get_home_ids(self) -> List[str]:
+        """Return known home/family IDs for Smart Home scoped APIs."""
+        uid = getattr(getattr(self.openapi, "token_info", None), "uid", "")
+        if not uid:
+            return []
+
+        response = self.openapi.get(f"/v1.0/users/{uid}/homes")
+        if not response or not response.get("success"):
+            return []
+
+        homes_data = self._extract_result_list(response.get("result", {}), ["homes", "list", "items", "result"])
+        home_ids = []
+        seen = set()
+        for home in homes_data:
+            if not isinstance(home, dict):
+                continue
+            home_id = home.get("home_id") or home.get("homeId") or home.get("id")
+            if home_id is None:
+                continue
+            home_id = str(home_id)
+            if home_id and home_id not in seen:
+                seen.add(home_id)
+                home_ids.append(home_id)
+        return home_ids
 
     # ========================================================================
     # DEVICE SPECIFICATIONS & CAPABILITIES
@@ -713,8 +995,24 @@ class TuyaClient:
                     "device_id": device_id
                 }
             
+            result = response.get("result", {})
+            raw_caps = []
+            if isinstance(result, list):
+                raw_caps = result
+            elif isinstance(result, dict):
+                # Common Tuya shape: {"category": "xx", "functions": [...]}.
+                if isinstance(result.get("functions"), list):
+                    raw_caps = result.get("functions", [])
+                elif isinstance(result.get("list"), list):
+                    raw_caps = result.get("list", [])
+                else:
+                    # Fallback: single capability object.
+                    raw_caps = [result]
+
             capabilities = []
-            for cap in response.get("result", []):
+            for cap in raw_caps:
+                if not isinstance(cap, dict):
+                    continue
                 capabilities.append({
                     "code": cap.get("code", ""),
                     "name": cap.get("name", ""),
@@ -849,9 +1147,18 @@ class TuyaClient:
         device_id = resolved["device_id"]
         
         try:
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - (24 * 60 * 60 * 1000)
+            size = max(1, min(int(limit), 100))
             response = self.openapi.get(
-                f"/v1.0/iot-03/devices/{device_id}/logs",
-                {"limit": limit}
+                f"/v1.0/devices/{device_id}/logs",
+                {
+                    "start_time": start_ms,
+                    "end_time": now_ms,
+                    "type": "1,2,3,4,5,6,7,8,9,10",
+                    "size": size,
+                    "query_type": 1,
+                }
             )
             
             if not response.get("success"):
@@ -863,11 +1170,17 @@ class TuyaClient:
                     "device_id": device_id
                 }
             
+            logs = response.get("result", {})
+            if isinstance(logs, dict):
+                logs = logs.get("logs", [])
+            if not isinstance(logs, list):
+                logs = []
+
             return {
                 "success": True,
-                "message": f"Retrieved {len(response.get('result', []))} events",
+                "message": f"Retrieved {len(logs)} events",
                 "device_id": device_id,
-                "data": response.get("result", [])
+                "data": logs
             }
         
         except Exception as e:
@@ -887,22 +1200,36 @@ class TuyaClient:
         device_id = resolved["device_id"]
         
         try:
-            response = self.openapi.get(f"/v1.0/iot-03/devices/{device_id}/energy")
-            
-            if not response.get("success"):
-                sys.stderr.write(f"Error getting energy usage: {response}\n")
+            status_result = self.get_device_status(device_id)
+            if not status_result.get("success"):
+                return status_result
+
+            status_data = status_result.get("data", {})
+            energy_like_codes = {
+                "cur_power", "cur_current", "cur_voltage", "add_ele", "today_energy", "month_energy",
+                "year_energy", "electricity", "power", "voltage", "current", "energy"
+            }
+
+            energy_data = {}
+            for code, value in status_data.items():
+                code_l = str(code).lower()
+                if code_l in energy_like_codes or "energy" in code_l or "power" in code_l or "voltage" in code_l or "current" in code_l:
+                    energy_data[code] = value
+
+            if not energy_data:
                 return {
                     "success": False,
-                    "error": "Could not retrieve energy usage",
-                    "message": f"API error: {response.get('msg', 'Unknown error')}",
-                    "device_id": device_id
+                    "error": "Energy data not available",
+                    "message": "This device does not expose energy-related status codes",
+                    "device_id": device_id,
+                    "suggestion": "Use tuya_get_device_status to inspect available codes for this device"
                 }
             
             return {
                 "success": True,
                 "message": "Energy usage retrieved successfully",
                 "device_id": device_id,
-                "data": response.get("result", {})
+                "data": energy_data
             }
         
         except Exception as e:
@@ -924,10 +1251,18 @@ class TuyaClient:
         if not resolved.get("success"):
             return resolved
         device_id = resolved["device_id"]
+        new_name = (new_name or "").strip()
+        if not new_name:
+            return {
+                "success": False,
+                "error": "Invalid device name",
+                "message": "Device name cannot be empty",
+                "device_id": device_id
+            }
         
         try:
             response = self.openapi.post(
-                f"/v1.0/iot-03/devices/{device_id}",
+                f"/v2.0/cloud/thing/{device_id}/attribute",
                 {"name": new_name}
             )
             
@@ -983,7 +1318,7 @@ class TuyaClient:
                 "message": "Device status retrieved successfully",
                 "device_id": device_id,
                 "data": {
-                    "online": device_info.get("online", False),
+                    "online": self._extract_online_status(device_info),
                     "ip": device_info.get("ip", ""),
                     "last_seen": device_info.get("lastSeen", "")
                 }

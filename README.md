@@ -293,6 +293,43 @@ mcp-server-tuya
 # or: python -m mcp_server_tuya
 ```
 
+## Testing
+
+### Unit Tests
+
+Install dev dependencies, then run pytest:
+
+```bash
+# with uv
+uv sync --dev
+uv run pytest -q
+
+# or with pip
+pip install -e ".[dev]"
+pytest -q
+```
+
+### API Smoke Test (Real Tuya Cloud)
+
+Run a non-destructive smoke test against your configured Tuya account:
+
+```bash
+uv run python smoke_test.py
+```
+
+Useful options:
+
+```bash
+# target a specific device id or exact name
+uv run python smoke_test.py --device "your_device_id_or_name"
+
+# include write checks (temporary rename + restore)
+uv run python smoke_test.py --include-write
+```
+
+The smoke test validates device listing, core read APIs, and optional endpoints (events/energy/rooms/scenes).
+Only required check failures make the command return a non-zero exit code.
+
 ## Troubleshooting
 
 ### "TUYA_ACCESS_ID environment variable is required"
