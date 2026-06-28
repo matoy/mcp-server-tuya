@@ -141,20 +141,26 @@ class TuyaClient:
 
         try:
             all_devices_raw = []
-            page_no = 1
-            page_size = 20  # Reduced page size to satisfy Tuya API limits (was 100)
+            page_size = 20  # Tuya API limit per page
+            last_row_key = ""  # Cursor for pagination (empty = first page)
             seen_device_ids = set()  # Track seen devices to prevent duplicates
+            page_num = 0
 
             while True:
+                page_num += 1
+                params = {"page_size": page_size}
+                if last_row_key:
+                    params["last_row_key"] = last_row_key
+
                 response = self.openapi.get(
                     "/v2.0/cloud/thing/device",
-                    {"page_no": page_no, "page_size": page_size}
+                    params
                 )
 
                 if not response.get("success"):
                     # Code 1110 = rate limit, retry with backoff
                     if response.get("code") == 1110:
-                        wait_time = 2 ** min(page_no, 4)
+                        wait_time = 2 ** min(page_num, 4)
                         sys.stderr.write(f"Rate limited, retrying in {wait_time}s...\n")
                         time.sleep(wait_time)
                         continue
@@ -166,9 +172,20 @@ class TuyaClient:
                         "suggestion": "Check your Tuya Cloud API credentials"
                     }
 
-                devices = response.get("result", [])
-                
-                # Add new devices, skip duplicates
+                result = response.get("result", {})
+
+                # The v2 API returns result as a dict with nested devices list
+                # and cursor-based pagination via last_row_key
+                if isinstance(result, dict):
+                    devices = result.get("devices", [])
+                    has_more = result.get("has_more", False)
+                    last_row_key = result.get("last_row_key", "")
+                else:
+                    # Fallback: some API versions return result as a direct list
+                    devices = result if isinstance(result, list) else []
+                    has_more = len(devices) >= page_size
+                    last_row_key = ""
+
                 new_devices_count = 0
                 for device in devices:
                     device_id = device.get("id", "")
@@ -176,20 +193,12 @@ class TuyaClient:
                         all_devices_raw.append(device)
                         seen_device_ids.add(device_id)
                         new_devices_count += 1
-                
-                sys.stderr.write(f"Page {page_no}: got {len(devices)} devices, {new_devices_count} new\n")
 
-                # If no new devices found, we've reached the end (pagination overlap)
-                if new_devices_count == 0:
-                    sys.stderr.write("No new devices in this page, pagination complete\n")
-                    break
+                sys.stderr.write(f"Page {page_num}: got {len(devices)} devices, {new_devices_count} new, has_more={has_more}\n")
 
-                # If fewer than page_size returned, no more pages
-                if len(devices) < page_size:
-                    sys.stderr.write(f"Fewer than {page_size} devices returned, pagination complete\n")
+                if not has_more or not last_row_key:
+                    sys.stderr.write("Pagination complete\n")
                     break
-                
-                page_no += 1
 
             all_devices = []
             for device in all_devices_raw:
